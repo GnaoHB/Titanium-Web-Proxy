@@ -15,6 +15,7 @@ using Titanium.Web.Proxy.Shared;
 using Titanium.Web.Proxy.Http;
 using System.Threading.Tasks;
 using Titanium.Web.Proxy.Extensions;
+using System.Text;
 
 namespace Titanium.Web.Proxy
 {
@@ -23,6 +24,84 @@ namespace Titanium.Web.Proxy
     /// </summary>
     partial class ProxyServer
     {
+
+        private async Task<bool> CheckAuthorization(StreamWriter clientStreamWriter, IEnumerable<HttpHeader> Headers)
+        {
+            if (AuthenticateUserFunc == null)
+            {
+                return true;
+            }
+            try
+            {
+                if (!Headers.Where(t => t.Name == "Proxy-Authorization").Any())
+                {
+
+                    await WriteResponseStatus(new Version(1, 1), "407",
+                                "Proxy Authentication Required", clientStreamWriter);
+                    var response = new Response();
+                    response.ResponseHeaders = new Dictionary<string, HttpHeader>();
+                    response.ResponseHeaders.Add("Proxy-Authenticate", new HttpHeader("Proxy-Authenticate", "Basic realm=\"TitaniumProxy\""));
+                    response.ResponseHeaders.Add("Proxy-Connection", new HttpHeader("Proxy-Connection", "close"));
+                    await WriteResponseHeaders(clientStreamWriter, response);
+
+                    await clientStreamWriter.WriteLineAsync();
+                    return false;
+                }
+                else
+                {
+                    var headerValue = Headers.Where(t => t.Name == "Proxy-Authorization").FirstOrDefault().Value.Trim();
+                    if (!headerValue.ToLower().StartsWith("basic"))
+                    {
+                        //Return not authorized
+                        await WriteResponseStatus(new Version(1, 1), "407",
+                             "Proxy Authentication Invalid", clientStreamWriter);
+                        var response = new Response();
+                        response.ResponseHeaders = new Dictionary<string, HttpHeader>();
+                        response.ResponseHeaders.Add("Proxy-Authenticate", new HttpHeader("Proxy-Authenticate", "Basic realm=\"TitaniumProxy\""));
+                        response.ResponseHeaders.Add("Proxy-Connection", new HttpHeader("Proxy-Connection", "close"));
+                        await WriteResponseHeaders(clientStreamWriter, response);
+
+                        await clientStreamWriter.WriteLineAsync();
+                        return false;
+                    }
+                    headerValue = headerValue.Substring(5).Trim();
+
+                    var decoded = Encoding.UTF8.GetString(Convert.FromBase64String(headerValue));
+                    if (decoded.Contains(":") == false)
+                    {
+                        //Return not authorized
+                        await WriteResponseStatus(new Version(1, 1), "407",
+                             "Proxy Authentication Invalid", clientStreamWriter);
+                        var response = new Response();
+                        response.ResponseHeaders = new Dictionary<string, HttpHeader>();
+                        response.ResponseHeaders.Add("Proxy-Authenticate", new HttpHeader("Proxy-Authenticate", "Basic realm=\"TitaniumProxy\""));
+                        response.ResponseHeaders.Add("Proxy-Connection", new HttpHeader("Proxy-Connection", "close"));
+                        await WriteResponseHeaders(clientStreamWriter, response);
+
+                        await clientStreamWriter.WriteLineAsync();
+                        return false;
+                    }
+                    var username = decoded.Substring(0, decoded.IndexOf(':'));
+                    var password = decoded.Substring(decoded.IndexOf(':') + 1);
+                    return await AuthenticateUserFunc(username, password).ConfigureAwait(false);
+                }
+            }
+            catch (Exception e)
+            {
+                //Return not authorized
+                await WriteResponseStatus(new Version(1, 1), "407",
+                             "Proxy Authentication Invalid", clientStreamWriter);
+                var response = new Response();
+                response.ResponseHeaders = new Dictionary<string, HttpHeader>();
+                response.ResponseHeaders.Add("Proxy-Authenticate", new HttpHeader("Proxy-Authenticate", "Basic realm=\"TitaniumProxy\""));
+                response.ResponseHeaders.Add("Proxy-Connection", new HttpHeader("Proxy-Connection", "close"));
+                await WriteResponseHeaders(clientStreamWriter, response);
+
+                await clientStreamWriter.WriteLineAsync();
+                return false;
+            }
+
+        }
         //This is called when client is aware of proxy
         //So for HTTPS requests client would send CONNECT header to negotiate a secure tcp tunnel via proxy
         private async Task HandleClient(ExplicitProxyEndPoint endPoint, TcpClient client)
@@ -77,11 +156,27 @@ namespace Titanium.Web.Proxy
                 var excluded = endPoint.ExcludedHttpsHostNameRegex != null ?
                     endPoint.ExcludedHttpsHostNameRegex.Any(x => Regex.IsMatch(httpRemoteUri.Host, x)) : false;
 
+
+                List<HttpHeader> connectRequestHeaders = null;
+
                 //Client wants to create a secure tcp tunnel (its a HTTPS request)
                 if (httpVerb.ToUpper() == "CONNECT" && !excluded && httpRemoteUri.Port != 80)
                 {
                     httpRemoteUri = new Uri("https://" + httpCmdSplit[1]);
-                    await clientStreamReader.ReadAllLinesAsync();
+                    string tmpLine = null;
+                    connectRequestHeaders = new List<HttpHeader>();
+                    while (!string.IsNullOrEmpty(tmpLine = await clientStreamReader.ReadLineAsync()))
+                    {
+                        var header = tmpLine.Split(ProxyConstants.ColonSplit, 2);
+
+                        var newHeader = new HttpHeader(header[0], header[1]);
+                        connectRequestHeaders.Add(newHeader);
+                    }
+                    if (await CheckAuthorization(clientStreamWriter, connectRequestHeaders) == false)
+                    {
+                        Dispose(clientStream, clientStreamReader, clientStreamWriter, null);
+                        return;
+                    }
 
                     await WriteConnectResponse(clientStreamWriter, version);
 
@@ -136,12 +231,11 @@ namespace Titanium.Web.Proxy
                     Dispose(clientStream, clientStreamReader, clientStreamWriter, null);
                     return;
                 }
-
                 //Now create the request
                 await HandleHttpSessionRequest(client, httpCmd, clientStream, clientStreamReader, clientStreamWriter,
-                      httpRemoteUri.Scheme == Uri.UriSchemeHttps ? httpRemoteUri.Host : null);
+                      httpRemoteUri.Scheme == Uri.UriSchemeHttps ? httpRemoteUri.Host : null, connectRequestHeaders, null, null);
             }
-            catch
+            catch (Exception ex)
             {
                 Dispose(clientStream, clientStreamReader, clientStreamWriter, null);
             }
@@ -200,7 +294,7 @@ namespace Titanium.Web.Proxy
 
             //Now create the request
             await HandleHttpSessionRequest(tcpClient, httpCmd, clientStream, clientStreamReader, clientStreamWriter,
-                 endPoint.EnableSsl ? endPoint.GenericCertificateName : null);
+                 endPoint.EnableSsl ? endPoint.GenericCertificateName : null,null);
         }
         /// <summary>
         /// This is the core request handler method for a particular connection from client
@@ -213,7 +307,7 @@ namespace Titanium.Web.Proxy
         /// <param name="httpsHostName"></param>
         /// <returns></returns>
         private async Task HandleHttpSessionRequest(TcpClient client, string httpCmd, Stream clientStream,
-            CustomBinaryReader clientStreamReader, StreamWriter clientStreamWriter, string httpsHostName)
+            CustomBinaryReader clientStreamReader, StreamWriter clientStreamWriter, string httpsHostName, List<HttpHeader> connectHeaders, ExternalProxy customUpStreamHttpProxy = null, ExternalProxy customUpStreamHttpsProxy = null)
         {
             TcpConnection connection = null;
 
@@ -248,6 +342,7 @@ namespace Titanium.Web.Proxy
                             httpVersion = new Version(1, 0);
                         }
                     }
+
 
                     //Read the request headers in to unique and non-unique header collections
                     string tmpLine;
@@ -294,6 +389,15 @@ namespace Titanium.Web.Proxy
                     args.ProxyClient.ClientStreamReader = clientStreamReader;
                     args.ProxyClient.ClientStreamWriter = clientStreamWriter;
 
+                    if (httpsHostName == null && (await CheckAuthorization(clientStreamWriter, args.WebSession.Request.RequestHeaders.Values) == false))
+                    {
+
+                        Dispose(clientStream, clientStreamReader, clientStreamWriter, args);
+                        break;
+                    }
+
+
+
                     PrepareRequestHeaders(args.WebSession.Request.RequestHeaders, args.WebSession);
                     args.WebSession.Request.Host = args.WebSession.Request.RequestUri.Authority;
 
@@ -327,15 +431,38 @@ namespace Titanium.Web.Proxy
                     //construct the web request that we are going to issue on behalf of the client.
                     if (connection == null)
                     {
+                        if (httpsHostName == null)
+                        {
+                            if (GetCustomUpStreamHttpProxyFunc != null)
+                            {
+                                customUpStreamHttpProxy = await GetCustomUpStreamHttpProxyFunc(args.WebSession.Request.RequestHeaders.Values).ConfigureAwait(false);
+                            }
+                        }
+                        else
+                        {
+                            if (GetCustomUpStreamHttpsProxyFunc != null)
+                            {
+                                foreach (var header in args.WebSession.Request.RequestHeaders.Values)
+                                {
+                                    connectHeaders.Add(header);
+                                }
+                                customUpStreamHttpsProxy = await GetCustomUpStreamHttpsProxyFunc(connectHeaders).ConfigureAwait(false);
+                            }
+                        }
+
+                        args.CustomUpStreamHttpProxyUsed = customUpStreamHttpProxy;
+                        args.CustomUpStreamHttpsProxyUsed = customUpStreamHttpsProxy;
+
                         connection = await tcpConnectionFactory.CreateClient(BUFFER_SIZE, ConnectionTimeOutSeconds,
                             args.WebSession.Request.RequestUri.Host, args.WebSession.Request.RequestUri.Port, httpVersion,
                             args.IsHttps, SupportedSslProtocols,
                             new RemoteCertificateValidationCallback(ValidateServerCertificate),
                             new LocalCertificateSelectionCallback(SelectClientCertificate),
-                            ExternalHttpProxy, ExternalHttpsProxy, clientStream);
+                            customUpStreamHttpProxy ?? UpStreamHttpProxy, customUpStreamHttpsProxy ?? UpStreamHttpsProxy, clientStream);
                     }
-                   
+
                     args.WebSession.Request.RequestLocked = true;
+
 
                     //If request was cancelled by user then dispose the client
                     if (args.WebSession.Request.CancelRequest)
@@ -343,6 +470,7 @@ namespace Titanium.Web.Proxy
                         Dispose(clientStream, clientStreamReader, clientStreamWriter, args);
                         break;
                     }
+
 
                     //if expect continue is enabled then send the headers first 
                     //and see if server would return 100 conitinue
@@ -418,7 +546,7 @@ namespace Titanium.Web.Proxy
                     httpCmd = await clientStreamReader.ReadLineAsync();
 
                 }
-                catch
+                catch (Exception e)
                 {
                     Dispose(clientStream, clientStreamReader, clientStreamWriter, args);
                     break;

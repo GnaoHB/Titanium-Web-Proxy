@@ -52,6 +52,9 @@ namespace Titanium.Web.Proxy.EventArguments
         /// </summary>
         public HttpWebClient WebSession { get; set; }
 
+        public ExternalProxy CustomUpStreamHttpProxyUsed { get; set; }
+
+        public ExternalProxy CustomUpStreamHttpsProxyUsed { get; set; }
 
         /// <summary>
         /// Constructor to initialize the proxy
