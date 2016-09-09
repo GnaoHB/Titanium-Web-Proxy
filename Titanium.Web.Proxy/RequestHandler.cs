@@ -435,7 +435,7 @@ namespace Titanium.Web.Proxy
                         {
                             if (GetCustomUpStreamHttpProxyFunc != null)
                             {
-                                customUpStreamHttpProxy = await GetCustomUpStreamHttpProxyFunc(args.WebSession.Request.RequestHeaders.Values).ConfigureAwait(false);
+                                customUpStreamHttpProxy = await GetCustomUpStreamHttpProxyFunc(args).ConfigureAwait(false);
                             }
                         }
                         else
@@ -446,7 +446,7 @@ namespace Titanium.Web.Proxy
                                 {
                                     connectHeaders.Add(header);
                                 }
-                                customUpStreamHttpsProxy = await GetCustomUpStreamHttpsProxyFunc(connectHeaders).ConfigureAwait(false);
+                                customUpStreamHttpsProxy = await GetCustomUpStreamHttpsProxyFunc(args).ConfigureAwait(false);
                             }
                         }
 
@@ -459,6 +459,18 @@ namespace Titanium.Web.Proxy
                             new RemoteCertificateValidationCallback(ValidateServerCertificate),
                             new LocalCertificateSelectionCallback(SelectClientCertificate),
                             customUpStreamHttpProxy ?? UpStreamHttpProxy, customUpStreamHttpsProxy ?? UpStreamHttpsProxy, clientStream);
+                    }
+                    else
+                    {
+                        if(connection.IsHttps)
+                        {
+
+                            args.CustomUpStreamHttpsProxyUsed = connection.UpStreamHttpsProxy;
+                        }
+                        else
+                        {
+                            args.CustomUpStreamHttpProxyUsed = connection.UpStreamHttpProxy;
+                        }
                     }
 
                     args.WebSession.Request.RequestLocked = true;

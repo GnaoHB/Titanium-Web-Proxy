@@ -24,13 +24,13 @@ namespace Titanium.Web.Proxy
             set;
         }
         //parameter is list of headers
-        public Func<IEnumerable<HttpHeader>, Task<ExternalProxy>> GetCustomUpStreamHttpProxyFunc
+        public Func<SessionEventArgs, Task<ExternalProxy>> GetCustomUpStreamHttpProxyFunc
         {
             get;
             set;
         }
         //parameter is list of headers
-        public Func<IEnumerable<HttpHeader>, Task<ExternalProxy>> GetCustomUpStreamHttpsProxyFunc
+        public Func<SessionEventArgs, Task<ExternalProxy>> GetCustomUpStreamHttpsProxyFunc
         {
             get;
             set;
@@ -425,7 +425,10 @@ namespace Titanium.Web.Proxy
                     {
                         if (tcpClient != null)
                         {
-                            tcpClient.LingerState = new LingerOption(true, 0);
+                            if (tcpClient.LingerState != null)
+                            {
+                                tcpClient.LingerState = new LingerOption(true, 0);
+                            }
                             tcpClient.Client.Shutdown(SocketShutdown.Both);
                             tcpClient.Client.Close();
                             tcpClient.Client.Dispose();
